@@ -10,14 +10,14 @@ import android.view.MotionEvent
 import android.view.View
 import kotlin.math.min
 
-/** 按毫米纸张比例模拟标签预览；可点选元素并拖动调整位置。 */
+/** 按毫米纸张比例模拟标签预览；点选后拖到另一行可交换内容。 */
 class LabelPreviewView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
     interface Listener {
-        fun onPositionsChanged(positions: Map<String, ElementPos>)
+        fun onOrderChanged(order: List<String>)
         fun onSelectionChanged(kind: PrintLayoutEngine.ElementBox.Kind?)
     }
 
@@ -32,10 +32,9 @@ class LabelPreviewView @JvmOverloads constructor(
     private var scale = 1f
     private var liveElements: List<PrintLayoutEngine.ElementBox> = emptyList()
     private var selectedKind: PrintLayoutEngine.ElementBox.Kind? = null
-    private var dragging = false
-    private var lastTouchX = 0f
-    private var lastTouchY = 0f
-    private var workingPositions: MutableMap<String, ElementPos> = linkedMapOf()
+    private var dragKind: PrintLayoutEngine.ElementBox.Kind? = null
+    private var dropTarget: PrintLayoutEngine.ElementBox.Kind? = null
+    private var workingOrder: MutableList<String> = mutableListOf()
 
     private val paperPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -68,6 +67,15 @@ class LabelPreviewView @JvmOverloads constructor(
         color = 0x220F766E
         style = Paint.Style.FILL
     }
+    private val dropPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFEA580C.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+    }
+    private val dropFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x22EA580C
+        style = Paint.Style.FILL
+    }
 
     fun setEditable(enabled: Boolean, listener: Listener? = null) {
         this.editable = enabled
@@ -79,16 +87,24 @@ class LabelPreviewView @JvmOverloads constructor(
         this.config = config
         this.sampleCode = code.ifBlank { "8842" }
         this.sampleRemark = remark?.ifBlank { "备注" } ?: "备注"
-        workingPositions = config.customPositions.toMutableMap()
+        workingOrder = config.rowOrder.toMutableList()
         invalidate()
     }
 
-    fun currentPositions(): Map<String, ElementPos> = workingPositions.toMap()
+    fun currentOrder(): List<String> = workingOrder.toList()
 
-    fun clearCustomPositions() {
-        workingPositions.clear()
+    fun elementOf(kind: PrintLayoutEngine.ElementBox.Kind): PrintLayoutEngine.ElementBox? {
+        val cfg = config.copy(rowOrder = workingOrder)
+        return PrintLayoutEngine.buildElements(cfg, sampleCode, sampleRemark)
+            .find { it.kind == kind }
+    }
+
+    fun resetOrder() {
+        workingOrder.clear()
         selectedKind = null
-        listener?.onPositionsChanged(emptyMap())
+        dragKind = null
+        dropTarget = null
+        listener?.onOrderChanged(emptyList())
         listener?.onSelectionChanged(null)
         invalidate()
     }
@@ -100,8 +116,8 @@ class LabelPreviewView @JvmOverloads constructor(
         val availH = height - pad * 2 - 28f
         if (availW <= 0 || availH <= 0) return
 
-        val paperW = config.paperWidthMm.coerceAtLeast(10f)
-        val paperH = config.paperHeightMm.coerceAtLeast(10f)
+        val paperW = config.layoutWidthMm.coerceAtLeast(10f)
+        val paperH = config.layoutHeightMm.coerceAtLeast(10f)
         scale = min(availW / paperW, availH / paperH)
         val drawW = paperW * scale
         val drawH = paperH * scale
@@ -112,14 +128,15 @@ class LabelPreviewView @JvmOverloads constructor(
         canvas.drawRoundRect(rect, 8f, 8f, paperPaint)
         canvas.drawRoundRect(rect, 8f, 8f, borderPaint)
 
+        val dir = config.orientation.label
         canvas.drawText(
-            "${paperW.toInt()}×${paperH.toInt()} mm · 点选拖动调整",
+            "${config.paperWidthMm.toInt()}×${config.paperHeightMm.toInt()} mm · $dir · 拖行交换",
             width / 2f,
             paperTop - 10f,
             hintPaint
         )
 
-        val cfg = config.copy(customPositions = workingPositions)
+        val cfg = config.copy(rowOrder = workingOrder)
         liveElements = PrintLayoutEngine.buildElements(cfg, sampleCode, sampleRemark)
         for (el in liveElements) {
             val x = paperLeft + (el.x * scale).toFloat()
@@ -127,18 +144,37 @@ class LabelPreviewView @JvmOverloads constructor(
             val w = (el.w * scale).toFloat()
             val h = (el.h * scale).toFloat()
             val box = RectF(x, y, x + w, y + h)
-            if (el.kind == selectedKind) {
-                canvas.drawRect(box, selectFill)
-                canvas.drawRect(box, selectPaint)
+            when {
+                el.kind == dropTarget && dropTarget != dragKind -> {
+                    canvas.drawRect(box, dropFill)
+                    canvas.drawRect(box, dropPaint)
+                }
+                el.kind == selectedKind || el.kind == dragKind -> {
+                    canvas.drawRect(box, selectFill)
+                    canvas.drawRect(box, selectPaint)
+                }
             }
             when (el.kind) {
                 PrintLayoutEngine.ElementBox.Kind.BARCODE -> drawFakeBarcode(canvas, x, y, w, h)
                 else -> {
-                    textPaint.textSize = (el.fontMm * scale).toFloat().coerceAtLeast(10f)
+                    // 与打印一致：字画在行框顶部区域内垂直居中显示（框高=字号）
+                    textPaint.textSize = (el.fontMm * scale).toFloat().coerceAtLeast(6f)
                     textPaint.isFakeBoldText = el.kind == PrintLayoutEngine.ElementBox.Kind.CODE
-                    val cx = x + w / 2f
-                    val cy = y + h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
-                    canvas.drawText(el.text, cx, cy, textPaint)
+                    val ty = y + h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
+                    when (config.alignFor(el.kind)) {
+                        TextHAlign.LEFT -> {
+                            textPaint.textAlign = Paint.Align.LEFT
+                            canvas.drawText(el.text, x + 2f, ty, textPaint)
+                        }
+                        TextHAlign.RIGHT -> {
+                            textPaint.textAlign = Paint.Align.RIGHT
+                            canvas.drawText(el.text, x + w - 2f, ty, textPaint)
+                        }
+                        TextHAlign.CENTER -> {
+                            textPaint.textAlign = Paint.Align.CENTER
+                            canvas.drawText(el.text, x + w / 2f, ty, textPaint)
+                        }
+                    }
                 }
             }
         }
@@ -150,34 +186,42 @@ class LabelPreviewView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 val hit = hitTest(event.x, event.y)
                 selectedKind = hit
+                dragKind = hit
+                dropTarget = null
                 listener?.onSelectionChanged(hit)
-                dragging = hit != null
-                lastTouchX = event.x
-                lastTouchY = event.y
                 parent?.requestDisallowInterceptTouchEvent(hit != null)
                 invalidate()
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                val kind = selectedKind ?: return true
-                if (!dragging) return true
-                val dxPx = event.x - lastTouchX
-                val dyPx = event.y - lastTouchY
-                lastTouchX = event.x
-                lastTouchY = event.y
-                val el = liveElements.find { it.kind == kind } ?: return true
-                val cur = workingPositions[kind.name]
-                    ?: ElementPos(el.x.toFloat(), el.y.toFloat())
-                val nx = (cur.xMm + dxPx / scale).coerceIn(0f, (config.paperWidthMm - 2f).coerceAtLeast(0f))
-                val ny = (cur.yMm + dyPx / scale).coerceIn(0f, (config.paperHeightMm - 2f).coerceAtLeast(0f))
-                workingPositions[kind.name] = ElementPos(nx, ny)
-                listener?.onPositionsChanged(workingPositions.toMap())
-                invalidate()
+                if (dragKind == null) return true
+                val hit = hitTest(event.x, event.y)
+                val next = if (hit != null && hit != dragKind) hit else null
+                if (next != dropTarget) {
+                    dropTarget = next
+                    invalidate()
+                }
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                dragging = false
+                val from = dragKind
+                val to = dropTarget
+                dragKind = null
+                dropTarget = null
                 parent?.requestDisallowInterceptTouchEvent(false)
+                if (event.actionMasked == MotionEvent.ACTION_UP && from != null && to != null && from != to) {
+                    val defaults = PrintLayoutEngine.defaultRowOrder(
+                        config.copy(rowOrder = emptyList()),
+                        sampleCode,
+                        sampleRemark
+                    )
+                    workingOrder = PrintLayoutEngine.swapOrder(workingOrder, from, to, defaults)
+                        .toMutableList()
+                    selectedKind = from
+                    listener?.onOrderChanged(workingOrder.toList())
+                    listener?.onSelectionChanged(from)
+                }
+                invalidate()
                 return true
             }
         }
@@ -185,13 +229,11 @@ class LabelPreviewView @JvmOverloads constructor(
     }
 
     private fun hitTest(x: Float, y: Float): PrintLayoutEngine.ElementBox.Kind? {
-        // 从上到下逆序，优先点到上层
         for (el in liveElements.asReversed()) {
             val l = paperLeft + (el.x * scale).toFloat()
             val t = paperTop + (el.y * scale).toFloat()
             val r = l + (el.w * scale).toFloat()
             val b = t + (el.h * scale).toFloat()
-            // 扩大一点点击区域
             if (x in (l - 8)..(r + 8) && y in (t - 8)..(b + 8)) return el.kind
         }
         return null
@@ -208,6 +250,7 @@ class LabelPreviewView @JvmOverloads constructor(
             cursor += barW + 1.2f
             i++
         }
+        textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = h * 0.22f
         textPaint.isFakeBoldText = false
         canvas.drawText(sampleCode, x + w / 2f, y + h, textPaint)

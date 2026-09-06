@@ -2,6 +2,7 @@ package com.pickup.print
 
 /**
  * 根据纸张尺寸与预设，计算各元素在标签上的毫米坐标。
+ * 行几何固定；[PrintLayoutConfig.rowOrder] 只决定各行放哪种内容。
  */
 object PrintLayoutEngine {
 
@@ -22,12 +23,109 @@ object PrintLayoutEngine {
         code: String,
         remark: String?
     ): List<ElementBox> {
-        val base = buildPresetElements(config, code, remark)
-        if (config.customPositions.isEmpty()) return base
-        return base.map { el ->
-            val pos = config.customPositions[el.kind.name] ?: return@map el
-            el.copy(x = pos.xMm.toDouble(), y = pos.yMm.toDouble())
+        val slots = buildPresetElements(config, code, remark)
+        if (slots.isEmpty()) return emptyList()
+
+        val defaultKinds = slots.map { it.kind }
+        val order = resolveOrder(config.rowOrder, defaultKinds)
+        val contentByKind = slots.associateBy { it.kind }
+
+        val ordered = order.mapIndexed { index, kind ->
+            val slot = slots[index]
+            val content = contentByKind[kind] ?: slot
+            val font = config.fontSizeFor(kind)?.toDouble() ?: content.fontMm
+            // 行高按字号本身，打印用顶对齐时 y~y+h 正好包住字形
+            val boxH = when (kind) {
+                ElementBox.Kind.BARCODE -> maxOf(slot.h, 6.0)
+                else -> font
+            }
+            ElementBox(
+                text = content.text,
+                x = slot.x,
+                y = slot.y,
+                w = slot.w,
+                h = boxH,
+                fontMm = font,
+                kind = kind
+            )
         }
+        return reflowByFont(ordered, config.layoutWidthMm.toDouble(), config.layoutHeightMm.toDouble())
+    }
+
+    /**
+     * 按字号确定行高后垂直居中整块内容；超高则等比缩小字号，避免顶部裁切。
+     */
+    private fun reflowByFont(
+        elements: List<ElementBox>,
+        pageW: Double,
+        pageH: Double
+    ): List<ElementBox> {
+        if (elements.isEmpty()) return elements
+        val margin = 2.5
+        val contentW = pageW - margin * 2
+        var sized = elements.map { el ->
+            val w = if (el.kind == ElementBox.Kind.BARCODE) (contentW - 4).coerceAtLeast(8.0) else contentW
+            val x = if (el.kind == ElementBox.Kind.BARCODE) margin + 2 else margin
+            el.copy(x = x, w = w)
+        }
+
+        val avail = (pageH - margin * 2).coerceAtLeast(1.0)
+        val gaps = (sized.size - 1).coerceAtLeast(0)
+        val minGap = 1.0
+        var sumH = sized.sumOf { it.h }
+        var need = sumH + minGap * gaps
+        if (need > avail && need > 0) {
+            val scale = avail / need
+            sized = sized.map { el ->
+                if (el.kind == ElementBox.Kind.BARCODE) {
+                    el.copy(h = (el.h * scale).coerceAtLeast(4.0))
+                } else {
+                    val f = (el.fontMm * scale).coerceAtLeast(2.0)
+                    el.copy(fontMm = f, h = f)
+                }
+            }
+            sumH = sized.sumOf { it.h }
+        }
+
+        // 上下与行间均分剩余空间，整块居中且顶边不低于 margin
+        val free = (avail - sumH).coerceAtLeast(0.0)
+        val piece = free / (sized.size + 1)
+        var y = margin + piece
+        return sized.map { el ->
+            val out = el.copy(y = y)
+            y += el.h + piece
+            out
+        }
+    }
+
+    fun defaultRowOrder(config: PrintLayoutConfig, code: String, remark: String?): List<ElementBox.Kind> =
+        buildPresetElements(config, code, remark).map { it.kind }
+
+    fun resolveOrder(
+        saved: List<String>,
+        defaultKinds: List<ElementBox.Kind>
+    ): List<ElementBox.Kind> {
+        if (defaultKinds.isEmpty()) return emptyList()
+        if (saved.isEmpty()) return defaultKinds
+        val byName = defaultKinds.associateBy { it.name }
+        val ordered = saved.mapNotNull { byName[it] }.distinct()
+        val missing = defaultKinds.filter { it !in ordered }
+        return ordered + missing
+    }
+
+    fun swapOrder(
+        order: List<String>,
+        a: ElementBox.Kind,
+        b: ElementBox.Kind,
+        defaultKinds: List<ElementBox.Kind>
+    ): List<String> {
+        val current = resolveOrder(order, defaultKinds).toMutableList()
+        val i = current.indexOf(a)
+        val j = current.indexOf(b)
+        if (i < 0 || j < 0 || i == j) return current.map { it.name }
+        current[i] = b
+        current[j] = a
+        return current.map { it.name }
     }
 
     private fun buildPresetElements(
@@ -35,8 +133,8 @@ object PrintLayoutEngine {
         code: String,
         remark: String?
     ): List<ElementBox> {
-        val width = config.paperWidthMm.toDouble()
-        val height = config.paperHeightMm.toDouble()
+        val width = config.layoutWidthMm.toDouble()
+        val height = config.layoutHeightMm.toDouble()
         val margin = 2.0
         val contentW = width - margin * 2
         val clean = code.trim()

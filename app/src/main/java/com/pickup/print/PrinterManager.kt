@@ -146,18 +146,19 @@ class PrinterManager(private val listener: Listener) {
             return false
         }
 
-        val width = layout.paperWidthMm.toDouble()
-        val height = layout.paperHeightMm.toDouble()
-        api.startJob(width, height, 0)
-
-        // 预览里文字是画布居中；LPAPI 默认左对齐，这里改为区域内水平/垂直居中
-        api.setItemHorizontalAlignment(LPAPI.ItemAlignment.CENTER)
-        api.setItemVerticalAlignment(LPAPI.ItemAlignment.MIDDLE)
+        // 仍按竖向坐标排版；横向时宽高互换 + orientation=90，横着看方向正确
+        val jobW = layout.layoutWidthMm.toDouble()
+        val jobH = layout.layoutHeightMm.toDouble()
+        api.startJob(jobW, jobH, layout.orientation.degrees)
+        // 顶对齐：y 为文字上沿，避免居中+自适应高度时字形向上越界
+        api.setItemVerticalAlignment(LPAPI.ItemAlignment.TOP)
 
         val elements = PrintLayoutEngine.buildElements(layout, clean, remark)
         for (el in elements) {
             when (el.kind) {
                 PrintLayoutEngine.ElementBox.Kind.BARCODE -> {
+                    api.setItemHorizontalAlignment(LPAPI.ItemAlignment.CENTER)
+                    api.setItemVerticalAlignment(LPAPI.ItemAlignment.TOP)
                     api.draw1DBarcode(
                         el.text,
                         LPAPI.BarcodeType.AUTO,
@@ -165,7 +166,20 @@ class PrinterManager(private val listener: Listener) {
                     )
                 }
                 else -> {
-                    api.drawText(el.text, el.x, el.y, el.w, el.h, el.fontMm)
+                    val hAlign = when (layout.alignFor(el.kind)) {
+                        TextHAlign.LEFT -> LPAPI.ItemAlignment.LEFT
+                        TextHAlign.CENTER -> LPAPI.ItemAlignment.CENTER
+                        TextHAlign.RIGHT -> LPAPI.ItemAlignment.RIGHT
+                    }
+                    api.setItemHorizontalAlignment(hAlign)
+                    api.setItemVerticalAlignment(LPAPI.ItemAlignment.TOP)
+                    val style = if (el.kind == PrintLayoutEngine.ElementBox.Kind.CODE) {
+                        LPAPI.FontStyle.BOLD
+                    } else {
+                        LPAPI.FontStyle.REGULAR
+                    }
+                    // 框高与字号一致，顶对齐，与预览同一套坐标
+                    api.drawText(el.text, el.x, el.y, el.w, el.h, el.fontMm, style)
                 }
             }
         }

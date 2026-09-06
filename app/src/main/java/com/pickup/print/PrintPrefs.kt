@@ -1,6 +1,7 @@
 package com.pickup.print
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 
 enum class LayoutPreset(val id: String, val label: String) {
@@ -15,22 +16,64 @@ enum class LayoutPreset(val id: String, val label: String) {
     }
 }
 
-/** 自定义元素左上角坐标（毫米）。 */
-data class ElementPos(val xMm: Float, val yMm: Float)
+enum class TextHAlign(val id: String, val label: String) {
+    LEFT("left", "左对齐"),
+    CENTER("center", "居中"),
+    RIGHT("right", "右对齐");
+
+    companion object {
+        fun fromId(id: String?): TextHAlign =
+            entries.find { it.id == id } ?: CENTER
+    }
+}
+
+/** 打印方向：布局仍按竖向排版，横向时逻辑宽高互换并旋转 90° 打印。 */
+enum class PrintOrientation(val id: String, val label: String, val degrees: Int) {
+    PORTRAIT("portrait", "竖向", 0),
+    LANDSCAPE("landscape", "横向", 90);
+
+    companion object {
+        fun fromId(id: String?): PrintOrientation =
+            entries.find { it.id == id } ?: PORTRAIT
+    }
+}
 
 data class PrintLayoutConfig(
     val paperWidthMm: Float = 48f,
     val paperHeightMm: Float = 40f,
+    val orientation: PrintOrientation = PrintOrientation.PORTRAIT,
     val preset: LayoutPreset = LayoutPreset.TITLE_TOP,
+    /** key = ElementBox.Kind.name（仅文字元素：TITLE/CODE/REMARK） */
+    val textAligns: Map<String, TextHAlign> = emptyMap(),
     val showTitle: Boolean = true,
     val showCode: Boolean = true,
     val showRemark: Boolean = true,
     val showBarcode: Boolean = true,
     val titleText: String = "上门取件码",
+    /** 兼容旧配置：未单独设 CODE 字号时用作默认 */
     val codeFontMm: Float = 10f,
-    /** key = ElementBox.Kind.name */
-    val customPositions: Map<String, ElementPos> = emptyMap()
-)
+    /** key = ElementBox.Kind.name → 字号 mm */
+    val fontSizes: Map<String, Float> = emptyMap(),
+    /** 行内容顺序（Kind.name），几何位固定，只交换内容 */
+    val rowOrder: List<String> = emptyList()
+) {
+    /** 排版用宽度：横向时与纸张高互换，间距随此自适应。 */
+    val layoutWidthMm: Float
+        get() = if (orientation == PrintOrientation.LANDSCAPE) paperHeightMm else paperWidthMm
+
+    /** 排版用高度：横向时与纸张宽互换。 */
+    val layoutHeightMm: Float
+        get() = if (orientation == PrintOrientation.LANDSCAPE) paperWidthMm else paperHeightMm
+
+    fun alignFor(kind: PrintLayoutEngine.ElementBox.Kind): TextHAlign =
+        textAligns[kind.name] ?: TextHAlign.CENTER
+
+    fun fontSizeFor(kind: PrintLayoutEngine.ElementBox.Kind): Float? {
+        fontSizes[kind.name]?.let { return it }
+        if (kind == PrintLayoutEngine.ElementBox.Kind.CODE) return codeFontMm
+        return null
+    }
+}
 
 class PrintPrefs(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -53,39 +96,77 @@ class PrintPrefs(context: Context) {
     fun loadLayout(): PrintLayoutConfig = PrintLayoutConfig(
         paperWidthMm = prefs.getFloat(KEY_W, 48f),
         paperHeightMm = prefs.getFloat(KEY_H, 40f),
+        orientation = PrintOrientation.fromId(prefs.getString(KEY_ORIENTATION, PrintOrientation.PORTRAIT.id)),
         preset = LayoutPreset.fromId(prefs.getString(KEY_PRESET, LayoutPreset.TITLE_TOP.id)),
+        textAligns = loadAligns(prefs.getString(KEY_ALIGNS, null)),
         showTitle = prefs.getBoolean(KEY_SHOW_TITLE, true),
         showCode = prefs.getBoolean(KEY_SHOW_CODE, true),
         showRemark = prefs.getBoolean(KEY_SHOW_REMARK, true),
         showBarcode = prefs.getBoolean(KEY_SHOW_BARCODE, true),
         titleText = prefs.getString(KEY_TITLE, "上门取件码") ?: "上门取件码",
         codeFontMm = prefs.getFloat(KEY_CODE_FONT, 10f),
-        customPositions = loadPositions(prefs.getString(KEY_POSITIONS, null))
+        fontSizes = loadFontSizes(prefs.getString(KEY_FONTS, null)),
+        rowOrder = loadRowOrder(prefs.getString(KEY_ROW_ORDER, null))
     )
 
     fun saveLayout(config: PrintLayoutConfig) {
         prefs.edit()
             .putFloat(KEY_W, config.paperWidthMm)
             .putFloat(KEY_H, config.paperHeightMm)
+            .putString(KEY_ORIENTATION, config.orientation.id)
             .putString(KEY_PRESET, config.preset.id)
+            .remove(KEY_ALIGN_LEGACY)
+            .remove(KEY_POSITIONS_LEGACY)
+            .putString(KEY_ALIGNS, saveAligns(config.textAligns))
             .putBoolean(KEY_SHOW_TITLE, config.showTitle)
             .putBoolean(KEY_SHOW_CODE, config.showCode)
             .putBoolean(KEY_SHOW_REMARK, config.showRemark)
             .putBoolean(KEY_SHOW_BARCODE, config.showBarcode)
             .putString(KEY_TITLE, config.titleText)
-            .putFloat(KEY_CODE_FONT, config.codeFontMm)
-            .putString(KEY_POSITIONS, savePositions(config.customPositions))
+            .putFloat(
+                KEY_CODE_FONT,
+                config.fontSizes[PrintLayoutEngine.ElementBox.Kind.CODE.name] ?: config.codeFontMm
+            )
+            .putString(KEY_FONTS, saveFontSizes(config.fontSizes))
+            .putString(KEY_ROW_ORDER, saveRowOrder(config.rowOrder))
             .apply()
     }
 
-    private fun loadPositions(raw: String?): Map<String, ElementPos> {
+    private fun loadAligns(raw: String?): Map<String, TextHAlign> {
+        if (!raw.isNullOrBlank()) {
+            return try {
+                val obj = JSONObject(raw)
+                buildMap {
+                    obj.keys().forEach { key ->
+                        put(key, TextHAlign.fromId(obj.getString(key)))
+                    }
+                }
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        }
+        val legacy = prefs.getString(KEY_ALIGN_LEGACY, null) ?: return emptyMap()
+        val align = TextHAlign.fromId(legacy)
+        return mapOf(
+            PrintLayoutEngine.ElementBox.Kind.TITLE.name to align,
+            PrintLayoutEngine.ElementBox.Kind.CODE.name to align,
+            PrintLayoutEngine.ElementBox.Kind.REMARK.name to align
+        )
+    }
+
+    private fun saveAligns(map: Map<String, TextHAlign>): String {
+        val obj = JSONObject()
+        map.forEach { (k, v) -> obj.put(k, v.id) }
+        return obj.toString()
+    }
+
+    private fun loadFontSizes(raw: String?): Map<String, Float> {
         if (raw.isNullOrBlank()) return emptyMap()
         return try {
             val obj = JSONObject(raw)
             buildMap {
                 obj.keys().forEach { key ->
-                    val item = obj.getJSONObject(key)
-                    put(key, ElementPos(item.getDouble("x").toFloat(), item.getDouble("y").toFloat()))
+                    put(key, obj.getDouble(key).toFloat())
                 }
             }
         } catch (_: Exception) {
@@ -93,12 +174,30 @@ class PrintPrefs(context: Context) {
         }
     }
 
-    private fun savePositions(map: Map<String, ElementPos>): String {
+    private fun saveFontSizes(map: Map<String, Float>): String {
         val obj = JSONObject()
-        map.forEach { (k, v) ->
-            obj.put(k, JSONObject().put("x", v.xMm.toDouble()).put("y", v.yMm.toDouble()))
-        }
+        map.forEach { (k, v) -> obj.put(k, v.toDouble()) }
         return obj.toString()
+    }
+
+    private fun loadRowOrder(raw: String?): List<String> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    add(arr.getString(i))
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveRowOrder(order: List<String>): String {
+        val arr = JSONArray()
+        order.forEach { arr.put(it) }
+        return arr.toString()
     }
 
     companion object {
@@ -107,13 +206,18 @@ class PrintPrefs(context: Context) {
         private const val KEY_DEFAULT_NAME = "default_printer_name"
         private const val KEY_W = "paper_w"
         private const val KEY_H = "paper_h"
+        private const val KEY_ORIENTATION = "print_orientation"
         private const val KEY_PRESET = "preset"
+        private const val KEY_ALIGN_LEGACY = "text_align"
+        private const val KEY_POSITIONS_LEGACY = "custom_positions"
+        private const val KEY_ALIGNS = "text_aligns"
         private const val KEY_SHOW_TITLE = "show_title"
         private const val KEY_SHOW_CODE = "show_code"
         private const val KEY_SHOW_REMARK = "show_remark"
         private const val KEY_SHOW_BARCODE = "show_barcode"
         private const val KEY_TITLE = "title_text"
         private const val KEY_CODE_FONT = "code_font"
-        private const val KEY_POSITIONS = "custom_positions"
+        private const val KEY_FONTS = "font_sizes"
+        private const val KEY_ROW_ORDER = "row_order"
     }
 }
