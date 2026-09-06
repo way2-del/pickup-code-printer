@@ -11,38 +11,108 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.Settings
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 
 /**
- * 轻量保活前台服务：降低被系统杀后台导致无障碍断开的概率。
- * 无障碍本身仍由系统托管，重启手机后需确认一次即可。
+ * 前台服务 + 通知栏快捷入口（拍照 / 截屏）。
+ * 截屏收起通知面板由无障碍服务完成，此处只发起请求。
  */
 class KeepAliveService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_CAMERA -> {
+                startAsForeground()
+                openCamera()
+                return START_STICKY
+            }
+            ACTION_SCREENSHOT -> {
+                startAsForeground()
+                triggerScreenshot()
+                return START_STICKY
+            }
+            else -> {
+                startAsForeground()
+                running = true
+                return START_STICKY
+            }
         }
-        startAsForeground()
-        running = true
-        return START_STICKY
+    }
+
+    private fun openCamera() {
+        val intent = Intent(this, CameraCaptureActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra(CameraCaptureActivity.EXTRA_FROM_QUICK, true)
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "无法打开相机：${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun triggerScreenshot() {
+        if (!PickupCaptureAccessibilityService.isUsable(this)) {
+            Toast.makeText(this, "请先开启无障碍服务后再截屏", Toast.LENGTH_LONG).show()
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {
+            }
+            return
+        }
+        val ok = PickupCaptureAccessibilityService.requestCapture(this)
+        if (!ok) {
+            Toast.makeText(this, "截屏未就绪，请稍后再试", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun startAsForeground() {
-        val channelId = "keepalive"
+        val channelId = CHANNEL_ID
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
-                NotificationChannel(channelId, "后台保活", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(
+                    channelId,
+                    "快捷入口",
+                    NotificationManager.IMPORTANCE_DEFAULT
+                ).apply {
+                    description = "通知栏拍照 / 截屏快捷入口"
+                    setShowBadge(false)
+                }
             )
         }
-        val open = PendingIntent.getActivity(
+
+        val openApp = PendingIntent.getActivity(
             this, 3,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            Intent(this, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val camera = PendingIntent.getService(
+            this, 5,
+            Intent(this, KeepAliveService::class.java).setAction(ACTION_CAMERA),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val screenshot = PendingIntent.getService(
+            this, 6,
+            Intent(this, KeepAliveService::class.java).setAction(ACTION_SCREENSHOT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val stop = PendingIntent.getService(
@@ -50,13 +120,19 @@ class KeepAliveService : Service() {
             Intent(this, KeepAliveService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("取件码打印运行中")
-            .setContentText("后台保活，减少无障碍被系统关掉")
+            .setContentTitle("取件码快捷入口")
+            .setContentText("点通知回 App · 或用下方按钮拍照 / 截屏")
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(open)
-            .addAction(0, "停止保活", stop)
+            .setContentIntent(openApp)
+            .addAction(0, "拍照", camera)
+            .addAction(0, "截屏", screenshot)
+            .addAction(0, "关闭", stop)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
 
         if (Build.VERSION.SDK_INT >= 34) {
@@ -68,6 +144,7 @@ class KeepAliveService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        running = true
     }
 
     override fun onDestroy() {
@@ -77,6 +154,9 @@ class KeepAliveService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.pickup.print.KEEPALIVE_STOP"
+        const val ACTION_CAMERA = "com.pickup.print.KEEPALIVE_CAMERA"
+        const val ACTION_SCREENSHOT = "com.pickup.print.KEEPALIVE_SCREENSHOT"
+        private const val CHANNEL_ID = "quick_entry"
         private const val NOTIFICATION_ID = 10088
 
         @Volatile

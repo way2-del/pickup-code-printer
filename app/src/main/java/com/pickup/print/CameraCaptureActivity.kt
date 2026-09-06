@@ -67,8 +67,24 @@ class CameraCaptureActivity : AppCompatActivity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    setResult(RESULT_OK, Intent().putExtra(EXTRA_BITMAP_PATH, file.absolutePath))
-                    finish()
+                    if (intent.getBooleanExtra(EXTRA_FROM_QUICK, false)) {
+                        startActivity(
+                            Intent(this@CameraCaptureActivity, MainActivity::class.java).apply {
+                                addFlags(
+                                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                                )
+                                putExtra(EXTRA_BITMAP_PATH, file.absolutePath)
+                                putExtra(MainActivity.EXTRA_FROM_CAMERA_QUICK, true)
+                            }
+                        )
+                        finish()
+                    } else {
+                        setResult(RESULT_OK, Intent().putExtra(EXTRA_BITMAP_PATH, file.absolutePath))
+                        finish()
+                    }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -84,5 +100,6 @@ class CameraCaptureActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_BITMAP_PATH = "bitmap_path"
+        const val EXTRA_FROM_QUICK = "from_quick"
     }
 }

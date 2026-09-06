@@ -20,17 +20,18 @@ import java.util.concurrent.Executor
 
 /**
  * 用无障碍 takeScreenshot 截取当前前台页面。
- * 比 MediaProjection 更不容易被「录屏隐私保护」糊成马赛克。
+ * 截屏前先通过全局动作收起通知下拉面板，避免截到通知栏。
  */
 class PickupCaptureAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { command -> mainHandler.post(command) }
+    private var capturePending = false
 
     private val captureReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_CAPTURE) {
-                requestScreenshot()
+                beginCaptureAfterShadeCollapsed()
             }
         }
     }
@@ -49,7 +50,6 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
             registerReceiver(captureReceiver, filter)
         }
         Log.i(TAG, "a11y connected")
-        // 无障碍重连后顺带确保保活服务在
         KeepAliveService.start(applicationContext)
     }
 
@@ -66,10 +66,72 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    private fun requestScreenshot() {
+    /**
+     * 先收起通知下拉面板，确认收起后再截屏。
+     */
+    private fun beginCaptureAfterShadeCollapsed() {
+        if (capturePending) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Toast.makeText(this, "无障碍截屏需要 Android 11+", Toast.LENGTH_LONG).show()
             CaptureBus.emitFailure("需要 Android 11+")
+            return
+        }
+        capturePending = true
+        dismissNotificationShade()
+        // 再补一次，部分机型第一次只缩一半
+        mainHandler.postDelayed({
+            dismissNotificationShade()
+            mainHandler.postDelayed({
+                takeScreenshotNow()
+            }, WAIT_AFTER_DISMISS_MS)
+        }, FIRST_DISMISS_GAP_MS)
+    }
+
+    private fun dismissNotificationShade() {
+        var ok = false
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                ok = performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+                Log.i(TAG, "DISMISS_NOTIFICATION_SHADE=$ok")
+            } catch (e: Exception) {
+                Log.w(TAG, "dismiss shade failed", e)
+            }
+        }
+        if (!ok) {
+            // 旧系统 / 个别 ROM：用返回键尝试关掉面板
+            try {
+                ok = performGlobalAction(GLOBAL_ACTION_BACK)
+                Log.i(TAG, "GLOBAL_ACTION_BACK fallback=$ok")
+            } catch (_: Exception) {
+            }
+        }
+        // 再尝试 StatusBarManager（无障碍进程里权限通常更够用）
+        try {
+            val statusBarService = getSystemService("statusbar")
+            if (statusBarService != null) {
+                val clazz = Class.forName("android.app.StatusBarManager")
+                for (name in listOf("collapsePanels", "collapse")) {
+                    try {
+                        clazz.getMethod(name).invoke(statusBarService)
+                        Log.i(TAG, "StatusBarManager.$name ok")
+                        break
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "StatusBarManager collapse failed", e)
+        }
+        try {
+            @Suppress("DEPRECATION")
+            sendBroadcast(Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun takeScreenshotNow() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            capturePending = false
             return
         }
         takeScreenshot(
@@ -77,6 +139,7 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
             mainExecutor,
             object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) {
+                    capturePending = false
                     val hardware = screenshot.hardwareBuffer
                     val bitmap = Bitmap.wrapHardwareBuffer(hardware, screenshot.colorSpace)
                         ?.copy(Bitmap.Config.ARGB_8888, false)
@@ -87,11 +150,11 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
                     }
                     lastBitmap = bitmap
                     CaptureBus.emitSuccess(bitmap)
-                    // 截屏成功立刻回 App（不等悬浮窗超时）
                     AppLauncher.bringMainToFront(this@PickupCaptureAccessibilityService, fromCapture = true)
                 }
 
                 override fun onFailure(errorCode: Int) {
+                    capturePending = false
                     val msg = when (errorCode) {
                         ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "截屏内部错误"
                         ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "无障碍权限不足"
@@ -109,6 +172,9 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "PickupA11y"
         const val ACTION_CAPTURE = "com.pickup.print.ACTION_A11Y_CAPTURE"
+        private const val FIRST_DISMISS_GAP_MS = 180L
+        /** 通知面板收起动画约 250–400ms，再多留余量 */
+        private const val WAIT_AFTER_DISMISS_MS = 650L
 
         @Volatile
         var instance: PickupCaptureAccessibilityService? = null
@@ -119,7 +185,6 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
 
         fun isRunning(): Boolean = instance != null
 
-        /** 系统设置里是否已开启（即使进程刚被杀、服务尚未重连，也算已开启）。 */
         fun isEnabledInSettings(context: Context): Boolean {
             val expected = ComponentName(context, PickupCaptureAccessibilityService::class.java)
             val enabled = Settings.Secure.getString(

@@ -6,10 +6,8 @@
     <string name="confirm_section">确认并打印</string>
     <string name="refresh_devices">刷新设备</string>
     <string name="disconnect">断开</string>
-    <string name="start_overlay">开启悬浮窗截屏</string>
-    <string name="stop_overlay">关闭悬浮窗</string>
     <string name="enable_accessibility">开启无障碍（截屏用）</string>
-    <string name="accessibility_service_description">用于截取快递 App 中的上门取件码。仅在你点击悬浮球「截取」时截屏，不使用系统录屏，可避开录屏隐私模糊。</string>
+    <string name="accessibility_service_description">用于截取快递 App 中的上门取件码。在通知栏点「截屏」时截取当前页面，不使用系统录屏，可避开录屏隐私模糊。点通知正文可回到本 App。</string>
     <string name="take_photo">拍照识别</string>
     <string name="pick_image">相册识别</string>
     <string name="history_list">识别历史列表</string>

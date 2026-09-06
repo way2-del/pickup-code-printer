@@ -44,8 +44,8 @@ class HistoryAdapter(
 
     companion object {
         fun sourceLabel(source: String): String = when (source) {
-            "overlay" -> "悬浮截屏"
-            "camera" -> "拍照"
+            "overlay", "screenshot" -> "截屏"
+            "camera", "camera_quick" -> "拍照"
             "gallery" -> "相册"
             else -> source
         }

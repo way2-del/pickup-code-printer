@@ -18,7 +18,7 @@ class BootReceiver : BroadcastReceiver() {
         // 稍晚启动，等系统就绪
         Handler(Looper.getMainLooper()).postDelayed({
             KeepAliveService.start(context.applicationContext)
-            // 若之前开着悬浮窗偏好，可再拉起（这里默认只保活）
+            // 开机后挂快捷通知（拍照 / 截屏）
         }, 8_000)
     }
 }

@@ -45,24 +45,14 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         }
     }
 
-    private val overlayPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        if (Settings.canDrawOverlays(this)) {
-            tryStartOverlay()
-        } else {
-            toast("需要悬浮窗权限才能截取其他 App 页面")
-        }
-    }
-
     private val accessibilitySettingsLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
         refreshCaptureStatus()
-        if (PickupCaptureAccessibilityService.isUsable(this) && Settings.canDrawOverlays(this)) {
-            FloatingCaptureService.start(this)
+        if (PickupCaptureAccessibilityService.isUsable(this)) {
+            KeepAliveService.start(this)
             refreshCaptureStatus()
-            toast("悬浮球已开启")
+            toast("无障碍已就绪，可用通知栏「截屏」")
         }
     }
 
@@ -143,13 +133,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         binding.btnEnableAccessibility.setOnClickListener {
             accessibilitySettingsLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
-        binding.btnKeepAlive.setOnClickListener { enableKeepAlive() }
-        binding.btnStartOverlay.setOnClickListener { startOverlayCapture() }
-        binding.btnStopOverlay.setOnClickListener {
-            FloatingCaptureService.stop(this)
-            refreshCaptureStatus()
-            toast("悬浮窗已关闭")
-        }
+        binding.btnKeepAlive.setOnClickListener { enableQuickEntry() }
         binding.btnTakePhoto.setOnClickListener {
             ensureCamera {
                 cameraLauncher.launch(Intent(this, CameraCaptureActivity::class.java))
@@ -171,7 +155,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         handleCaptureIntent(intent)
         showLatestPreview(historyRepo.latest())
         startAutoConnectScan()
-        // 启动即保活，降低无障碍被杀概率
+        // 启动即挂快捷通知（拍照 / 截屏）
         KeepAliveService.start(this)
         maybeAskBatteryWhitelist()
     }
@@ -188,7 +172,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         refreshCaptureStatus()
         PickupCaptureAccessibilityService.lastBitmap?.let { bmp ->
             PickupCaptureAccessibilityService.lastBitmap = null
-            runOcr(bmp, source = "overlay")
+            runOcr(bmp, source = "screenshot")
         }
         showLatestPreview(historyRepo.latest())
     }
@@ -239,7 +223,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
     }
 
     override fun onCaptured(bitmap: Bitmap) {
-        runOcr(bitmap, source = "overlay")
+        runOcr(bitmap, source = "screenshot")
     }
 
     override fun onFailed(message: String) {
@@ -247,42 +231,33 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
     }
 
     private fun handleCaptureIntent(intent: Intent?) {
-        if (intent?.getBooleanExtra(EXTRA_FROM_CAPTURE, false) == true) {
+        if (intent == null) return
+        val path = intent.getStringExtra(CameraCaptureActivity.EXTRA_BITMAP_PATH)
+        if (!path.isNullOrBlank()) {
+            intent.removeExtra(CameraCaptureActivity.EXTRA_BITMAP_PATH)
+            val bmp = android.graphics.BitmapFactory.decodeFile(path)
+            if (bmp != null) {
+                val source = if (intent.getBooleanExtra(EXTRA_FROM_CAMERA_QUICK, false)) {
+                    "camera_quick"
+                } else {
+                    "camera"
+                }
+                intent.removeExtra(EXTRA_FROM_CAMERA_QUICK)
+                runOcr(bmp, source = source)
+            }
+        }
+        if (intent.getBooleanExtra(EXTRA_FROM_CAPTURE, false)) {
+            intent.removeExtra(EXTRA_FROM_CAPTURE)
             PickupCaptureAccessibilityService.lastBitmap?.let { bmp ->
                 PickupCaptureAccessibilityService.lastBitmap = null
-                runOcr(bmp, source = "overlay")
+                runOcr(bmp, source = "screenshot")
             }
         }
     }
 
-    private fun startOverlayCapture() {
-        if (!PickupCaptureAccessibilityService.isUsable(this)) {
-            toast("请先开启无障碍服务（用于真实截屏，避开录屏模糊）")
-            accessibilitySettingsLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            return
-        }
-        if (!Settings.canDrawOverlays(this)) {
-            toast("请先允许「显示在其他应用上层」")
-            val uri = Uri.parse("package:$packageName")
-            overlayPermissionLauncher.launch(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, uri)
-            )
-            return
-        }
-        KeepAliveService.start(this)
-        tryStartOverlay()
-    }
-
-    private fun tryStartOverlay() {
-        FloatingCaptureService.start(this)
-        refreshCaptureStatus()
-        toast("悬浮球已开启：切到取件码页后点「截取」")
-    }
-
-    private fun enableKeepAlive() {
+    private fun enableQuickEntry() {
         KeepAliveService.start(this)
         maybeAskBatteryWhitelist(force = true)
-        // 小米自启动引导
         try {
             val miui = Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT)
             if (miui.resolveActivity(packageManager) != null) {
@@ -291,7 +266,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         } catch (_: Exception) {
         }
         refreshCaptureStatus()
-        toast("已开启保活通知；请把电池设为「无限制」")
+        toast("已开启通知栏快捷入口：拍照 / 截屏；点通知可回 App")
     }
 
     private fun maybeAskBatteryWhitelist(force: Boolean = false) {
@@ -321,19 +296,23 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
     }
 
     private fun refreshCaptureStatus() {
-        val floatOn = FloatingCaptureService.running
-        binding.tvOverlayStatus.text =
-            if (floatOn) "悬浮窗：已开启（点悬浮球截取）" else "悬浮窗：未开启"
-        binding.tvOverlayStatus.setTextColor(
-            ContextCompat.getColor(this, if (floatOn) R.color.accent else R.color.muted)
+        val keepOn = KeepAliveService.running
+        val battOk = KeepAliveService.isIgnoringBatteryOptimizations(this)
+        binding.tvQuickEntryStatus.text = when {
+            keepOn && battOk -> "快捷通知：已开启（拍照 / 截屏）· 电池无限制"
+            keepOn -> "快捷通知：已开启 · 建议设电池无限制"
+            else -> "快捷通知：未开启（点下方按钮开启）"
+        }
+        binding.tvQuickEntryStatus.setTextColor(
+            ContextCompat.getColor(this, if (keepOn) R.color.accent else R.color.muted)
         )
 
         val a11yOn = PickupCaptureAccessibilityService.isEnabledInSettings(this)
         val a11yLive = PickupCaptureAccessibilityService.isRunning()
         binding.tvAccessibilityStatus.text = when {
-            a11yLive -> "无障碍：已开启且在线（重启手机前一般不用重开）"
-            a11yOn -> "无障碍：已开启，重连中…（无需重开，稍等或回前台）"
-            else -> "无障碍：未开启（截屏必需；重启后才需再开一次）"
+            a11yLive -> "无障碍：已开启且在线（截屏可用）"
+            a11yOn -> "无障碍：已开启，重连中…（稍等或回前台）"
+            else -> "无障碍：未开启（通知栏「截屏」必需）"
         }
         binding.tvAccessibilityStatus.setTextColor(
             ContextCompat.getColor(
@@ -344,17 +323,6 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
                     else -> R.color.danger
                 }
             )
-        )
-
-        val keepOn = KeepAliveService.running
-        val battOk = KeepAliveService.isIgnoringBatteryOptimizations(this)
-        binding.tvKeepAliveStatus.text = when {
-            keepOn && battOk -> "保活：前台服务中 · 电池无限制"
-            keepOn -> "保活：前台服务中 · 请点按钮设电池无限制"
-            else -> "保活：未开启（建议开启，减少无障碍掉线）"
-        }
-        binding.tvKeepAliveStatus.setTextColor(
-            ContextCompat.getColor(this, if (keepOn && battOk) R.color.accent else R.color.muted)
         )
     }
 
@@ -558,5 +526,6 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
 
     companion object {
         const val EXTRA_FROM_CAPTURE = "from_capture"
+        const val EXTRA_FROM_CAMERA_QUICK = "from_camera_quick"
     }
 }

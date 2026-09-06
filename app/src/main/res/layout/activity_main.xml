@@ -39,7 +39,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="悬浮截屏 / 拍照识别 → 人工确认 → 德佟 P2 打印"
+            android:text="通知栏快捷入口（拍照 / 截屏）→ 确认 → 德佟 P2 打印"
             android:textColor="@color/muted"
             android:textSize="13sp" />
 
@@ -129,11 +129,11 @@
                 android:textStyle="bold" />
 
             <TextView
-                android:id="@+id/tvOverlayStatus"
+                android:id="@+id/tvQuickEntryStatus"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="悬浮窗：未开启"
+                android:text="快捷通知：未开启"
                 android:textColor="@color/muted"
                 android:textSize="13sp" />
 
@@ -143,15 +143,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="无障碍：未开启（截屏必需）"
-                android:textColor="@color/muted"
-                android:textSize="13sp" />
-
-            <TextView
-                android:id="@+id/tvKeepAliveStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="保活：未开启"
                 android:textColor="@color/muted"
                 android:textSize="13sp" />
 
@@ -169,22 +160,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="开启后台保活（免杀）" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnStartOverlay"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/start_overlay" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnStopOverlay"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="@string/stop_overlay" />
+                android:text="开启快捷通知（拍照 / 截屏）" />
 
             <LinearLayout
                 android:layout_width="match_parent"
