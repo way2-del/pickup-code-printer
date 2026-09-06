@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">上门取件码打印</string>
+    <string name="settings">设置</string>
     <string name="printer_section">德佟 P2 打印机</string>
     <string name="capture_section">识别取件码</string>
     <string name="confirm_section">确认并打印</string>

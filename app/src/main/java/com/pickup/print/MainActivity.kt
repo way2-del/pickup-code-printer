@@ -6,11 +6,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
+import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
+import android.widget.PopupWindow
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -21,6 +25,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.dothantech.printer.IDzPrinter.PrinterAddress
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.pickup.print.databinding.ActivityMainBinding
+import com.pickup.print.databinding.DialogPrinterMenuBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,23 +45,16 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
     private var pendingAutoConnect = true
     private var clipboardDialog: AlertDialog? = null
     private var clipboardPromptedThisResume = false
+    private var printerPopup: PopupWindow? = null
+    private var printerMenuBinding: DialogPrinterMenuBinding? = null
+    private var lastPrinterStatusMessage: String = ""
+    private var printerConnected: Boolean = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         if (result.values.any { !it }) {
             toast("部分权限未授予，蓝牙搜索/拍照可能不可用")
-        }
-    }
-
-    private val accessibilitySettingsLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        refreshCaptureStatus()
-        if (PickupCaptureAccessibilityService.isUsable(this)) {
-            KeepAliveService.start(this)
-            refreshCaptureStatus()
-            toast("无障碍已就绪，可用快捷开关「取件截屏」")
         }
     }
 
@@ -111,34 +109,19 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
                 val key = PrinterAdapter.keyOf(address)
                 printPrefs.setDefaultPrinter(key, PrinterManager.displayName(address))
                 printerAdapter.setDefaultKey(key)
-                refreshDefaultPrinterLabel()
+                refreshPrinterHeader()
                 toast("已设为默认：${PrinterManager.displayName(address)}")
                 if (!printerManager.isConnected()) {
                     ensureBluetooth { printerManager.connect(address) }
                 }
             }
         )
-
-        binding.rvPrinters.layoutManager = LinearLayoutManager(this)
-        binding.rvPrinters.adapter = printerAdapter
         printerAdapter.setDefaultKey(printPrefs.defaultPrinterKey)
-        refreshDefaultPrinterLabel()
 
-        binding.btnRefreshPrinters.setOnClickListener {
-            ensureBluetooth {
-                requestRuntimePermissions()
-                pendingAutoConnect = true
-                autoConnectAttempted = false
-                printerManager.refreshDiscovery()
-                toast("正在搜索打印机…")
-            }
+        binding.btnPrinterMenu.setOnClickListener { showPrinterMenu() }
+        binding.btnSettings.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
-        binding.btnDisconnect.setOnClickListener { printerManager.disconnect() }
-        binding.btnEnableAccessibility.setOnClickListener {
-            accessibilitySettingsLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }
-        binding.btnAddQsTiles.setOnClickListener { QuickTileHelper.requestAddTiles(this) }
-        binding.btnKeepAlive.setOnClickListener { enableQuickEntry() }
         binding.btnTakePhoto.setOnClickListener {
             ensureCamera {
                 cameraLauncher.launch(Intent(this, CameraCaptureActivity::class.java))
@@ -148,9 +131,6 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         binding.btnHistory.setOnClickListener {
             historyLauncher.launch(Intent(this, HistoryActivity::class.java))
         }
-        binding.btnPrintLayout.setOnClickListener {
-            startActivity(Intent(this, PrintLayoutActivity::class.java))
-        }
         binding.btnPrint.setOnClickListener { printCode() }
         binding.ivPreview.setOnClickListener {
             ImagePreviewDialog.showFromPath(this, latestThumbPath)
@@ -159,8 +139,8 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         requestRuntimePermissions()
         handleCaptureIntent(intent)
         showLatestPreview(historyRepo.latest())
+        refreshPrinterHeader()
         startAutoConnectScan()
-        // 启动即挂快捷通知（拍照 / 截屏）
         KeepAliveService.start(this)
         maybeAskBatteryWhitelist()
     }
@@ -174,13 +154,12 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
     override fun onResume() {
         super.onResume()
         CaptureBus.setCallback(this)
-        refreshCaptureStatus()
         PickupCaptureAccessibilityService.lastBitmap?.let { bmp ->
             PickupCaptureAccessibilityService.lastBitmap = null
             runOcr(bmp, source = "screenshot")
         }
         showLatestPreview(historyRepo.latest())
-        // 进前台扫剪切板（延迟一点，等焦点稳定，系统才允许读剪贴板）
+        refreshPrinterHeader()
         clipboardPromptedThisResume = false
         binding.root.postDelayed({ maybePromptClipboard() }, 350)
     }
@@ -189,10 +168,12 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         CaptureBus.setCallback(null)
         clipboardDialog?.dismiss()
         clipboardDialog = null
+        dismissPrinterMenu()
         super.onPause()
     }
 
     override fun onDestroy() {
+        dismissPrinterMenu()
         printerManager.quit()
         super.onDestroy()
     }
@@ -210,20 +191,18 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         connected: Boolean,
         connectedAddress: PrinterAddress?
     ) {
-        binding.tvPrinterStatus.text = message
-        binding.tvPrinterStatus.setTextColor(
-            ContextCompat.getColor(this, if (connected) R.color.accent else R.color.muted)
-        )
+        lastPrinterStatusMessage = message
+        printerConnected = connected
         printerAdapter.setConnected(connectedAddress)
+        refreshPrinterHeader()
         if (connected && connectedAddress != null) {
-            // 首次成功连接且未设置默认时，自动记为默认
             if (printPrefs.defaultPrinterKey.isNullOrBlank()) {
                 printPrefs.setDefaultPrinter(
                     PrinterAdapter.keyOf(connectedAddress),
                     PrinterManager.displayName(connectedAddress)
                 )
                 printerAdapter.setDefaultKey(printPrefs.defaultPrinterKey)
-                refreshDefaultPrinterLabel()
+                refreshPrinterHeader()
             }
         }
     }
@@ -238,6 +217,102 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
 
     override fun onFailed(message: String) {
         toast(message)
+    }
+
+    private fun showPrinterMenu() {
+        if (printerPopup?.isShowing == true) {
+            dismissPrinterMenu()
+            return
+        }
+        val menu = DialogPrinterMenuBinding.inflate(LayoutInflater.from(this))
+        printerMenuBinding = menu
+        menu.rvPopupPrinters.layoutManager = LinearLayoutManager(this)
+        menu.rvPopupPrinters.adapter = printerAdapter
+        menu.btnPopupRefresh.setOnClickListener {
+            ensureBluetooth {
+                requestRuntimePermissions()
+                pendingAutoConnect = true
+                autoConnectAttempted = false
+                printerManager.refreshDiscovery()
+                toast("正在搜索打印机…")
+            }
+        }
+        menu.btnPopupDisconnect.setOnClickListener { printerManager.disconnect() }
+        syncPrinterMenuTexts()
+
+        val width = binding.btnPrinterMenu.width.coerceAtLeast(
+            (resources.displayMetrics.widthPixels * 0.88f).toInt()
+        )
+        val popup = PopupWindow(
+            menu.root,
+            width,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            true
+        ).apply {
+            elevation = 12f
+            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            isOutsideTouchable = true
+            setOnDismissListener {
+                printerPopup = null
+                printerMenuBinding = null
+            }
+        }
+        printerPopup = popup
+        popup.showAsDropDown(binding.btnPrinterMenu, 0, 8, Gravity.START)
+
+        // 打开时顺便刷一次设备列表
+        ensureBluetooth {
+            printerManager.refreshDiscovery()
+        }
+    }
+
+    private fun dismissPrinterMenu() {
+        printerPopup?.dismiss()
+        printerPopup = null
+        printerMenuBinding = null
+    }
+
+    private fun syncPrinterMenuTexts() {
+        val menu = printerMenuBinding ?: return
+        val status = lastPrinterStatusMessage.ifBlank {
+            if (printerConnected) "已连接" else getString(R.string.printer_idle)
+        }
+        menu.tvPopupStatus.text = status
+        menu.tvPopupStatus.setTextColor(
+            ContextCompat.getColor(this, if (printerConnected) R.color.accent else R.color.muted)
+        )
+        val defaultName = printPrefs.defaultPrinterName
+        menu.tvPopupDefault.text = if (defaultName.isNullOrBlank()) {
+            "默认：未设置（多台时请点「设默认」）"
+        } else {
+            "默认：$defaultName（启动自动连接）"
+        }
+    }
+
+    private fun refreshPrinterHeader() {
+        val connected = printerManager.connectedAddress
+        val title = when {
+            connected != null -> PrinterManager.displayName(connected)
+            !printPrefs.defaultPrinterName.isNullOrBlank() -> printPrefs.defaultPrinterName!!
+            else -> getString(R.string.printer_idle)
+        }
+        binding.tvPrinterTitle.text = title
+        binding.tvPrinterTitle.setTextColor(
+            ContextCompat.getColor(this, if (printerConnected || connected != null) R.color.accent else R.color.ink)
+        )
+
+        val status = lastPrinterStatusMessage.ifBlank {
+            when {
+                connected != null -> "已连接 · 点此管理打印机"
+                !printPrefs.defaultPrinterName.isNullOrBlank() -> "默认机未连接 · 点此搜索连接"
+                else -> "点此选择 / 连接打印机"
+            }
+        }
+        binding.tvPrinterStatus.text = status
+        binding.tvPrinterStatus.setTextColor(
+            ContextCompat.getColor(this, if (printerConnected) R.color.accent else R.color.muted)
+        )
+        syncPrinterMenuTexts()
     }
 
     private fun handleCaptureIntent(intent: Intent?) {
@@ -265,32 +340,18 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         }
     }
 
-    private fun enableQuickEntry() {
-        KeepAliveService.start(this)
-        maybeAskBatteryWhitelist(force = true)
-        try {
-            val miui = Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT)
-            if (miui.resolveActivity(packageManager) != null) {
-                startActivity(miui)
-            }
-        } catch (_: Exception) {
-        }
-        refreshCaptureStatus()
-        toast("已开启保活；拍照/截屏请用系统快捷开关")
-    }
-
     private fun maybeAskBatteryWhitelist(force: Boolean = false) {
         if (KeepAliveService.isIgnoringBatteryOptimizations(this) && !force) return
         if (!force && !shouldPromptBattery()) return
         try {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                 data = Uri.parse("package:$packageName")
             }
             startActivity(intent)
             markBatteryPrompted()
         } catch (_: Exception) {
             try {
-                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             } catch (_: Exception) {
             }
         }
@@ -303,37 +364,6 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
 
     private fun markBatteryPrompted() {
         getSharedPreferences("keepalive", MODE_PRIVATE).edit().putBoolean("battery_asked", true).apply()
-    }
-
-    private fun refreshCaptureStatus() {
-        val keepOn = KeepAliveService.running
-        val battOk = KeepAliveService.isIgnoringBatteryOptimizations(this)
-        binding.tvQuickEntryStatus.text = when {
-            keepOn && battOk -> "保活通知：已开 · 请用快捷开关「取件拍照/截屏」"
-            keepOn -> "保活通知：已开 · 建议设电池无限制；拍照请用快捷开关"
-            else -> "快捷开关：下拉编辑添加「取件拍照 / 取件截屏」"
-        }
-        binding.tvQuickEntryStatus.setTextColor(
-            ContextCompat.getColor(this, if (keepOn) R.color.accent else R.color.muted)
-        )
-
-        val a11yOn = PickupCaptureAccessibilityService.isEnabledInSettings(this)
-        val a11yLive = PickupCaptureAccessibilityService.isRunning()
-        binding.tvAccessibilityStatus.text = when {
-            a11yLive -> "无障碍：已开启且在线（截屏可用）"
-            a11yOn -> "无障碍：已开启，重连中…（稍等或回前台）"
-            else -> "无障碍：未开启（快捷开关「取件截屏」必需）"
-        }
-        binding.tvAccessibilityStatus.setTextColor(
-            ContextCompat.getColor(
-                this,
-                when {
-                    a11yLive -> R.color.accent
-                    a11yOn -> R.color.accent
-                    else -> R.color.danger
-                }
-            )
-        )
     }
 
     private fun runOcr(bitmap: Bitmap, source: String) {
@@ -457,7 +487,8 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
             pendingAutoConnect = true
             autoConnectAttempted = false
             printerManager.refreshDiscovery()
-            binding.tvPrinterStatus.text = "正在搜索并连接默认打印机…"
+            lastPrinterStatusMessage = "正在搜索并连接默认打印机…"
+            refreshPrinterHeader()
         }
     }
 
@@ -475,13 +506,12 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
                 devices.find { PrinterAdapter.keyOf(it) == defaultKey }
                     ?: devices.find { it.shownName == printPrefs.defaultPrinterName }
             devices.size == 1 -> devices.first().also {
-                // 仅一台时自动设为默认
                 printPrefs.setDefaultPrinter(
                     PrinterAdapter.keyOf(it),
                     PrinterManager.displayName(it)
                 )
                 printerAdapter.setDefaultKey(printPrefs.defaultPrinterKey)
-                refreshDefaultPrinterLabel()
+                refreshPrinterHeader()
             }
             else -> null
         }
@@ -498,15 +528,6 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         } else if (devices.size > 1 && defaultKey.isNullOrBlank()) {
             pendingAutoConnect = false
             toast("发现多台打印机，请点「设默认」指定开机自动连接")
-        }
-    }
-
-    private fun refreshDefaultPrinterLabel() {
-        val name = printPrefs.defaultPrinterName
-        binding.tvDefaultPrinter.text = if (name.isNullOrBlank()) {
-            "默认打印机：未设置（多台时请点「设默认」）"
-        } else {
-            "默认打印机：$name（启动自动连接）"
         }
     }
 

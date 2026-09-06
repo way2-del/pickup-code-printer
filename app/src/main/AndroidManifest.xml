@@ -75,6 +75,12 @@
             android:excludeFromRecents="true"
             android:screenOrientation="portrait" />
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="portrait" />
+
         <service
             android:name=".KeepAliveService"
             android:exported="false"
