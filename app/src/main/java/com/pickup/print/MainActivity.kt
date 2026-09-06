@@ -13,11 +13,13 @@ import android.provider.Settings
 import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.dothantech.printer.IDzPrinter.PrinterAddress
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.pickup.print.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -36,6 +38,8 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
     private var latestThumbPath: String? = null
     private var autoConnectAttempted = false
     private var pendingAutoConnect = true
+    private var clipboardDialog: AlertDialog? = null
+    private var clipboardPromptedThisResume = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -52,7 +56,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         if (PickupCaptureAccessibilityService.isUsable(this)) {
             KeepAliveService.start(this)
             refreshCaptureStatus()
-            toast("无障碍已就绪，可用通知栏「截屏」")
+            toast("无障碍已就绪，可用快捷开关「取件截屏」")
         }
     }
 
@@ -133,6 +137,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         binding.btnEnableAccessibility.setOnClickListener {
             accessibilitySettingsLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
+        binding.btnAddQsTiles.setOnClickListener { QuickTileHelper.requestAddTiles(this) }
         binding.btnKeepAlive.setOnClickListener { enableQuickEntry() }
         binding.btnTakePhoto.setOnClickListener {
             ensureCamera {
@@ -175,10 +180,15 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
             runOcr(bmp, source = "screenshot")
         }
         showLatestPreview(historyRepo.latest())
+        // 进前台扫剪切板（延迟一点，等焦点稳定，系统才允许读剪贴板）
+        clipboardPromptedThisResume = false
+        binding.root.postDelayed({ maybePromptClipboard() }, 350)
     }
 
     override fun onPause() {
         CaptureBus.setCallback(null)
+        clipboardDialog?.dismiss()
+        clipboardDialog = null
         super.onPause()
     }
 
@@ -266,7 +276,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         } catch (_: Exception) {
         }
         refreshCaptureStatus()
-        toast("已开启通知栏快捷入口：拍照 / 截屏；点通知可回 App")
+        toast("已开启保活；拍照/截屏请用系统快捷开关")
     }
 
     private fun maybeAskBatteryWhitelist(force: Boolean = false) {
@@ -299,9 +309,9 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         val keepOn = KeepAliveService.running
         val battOk = KeepAliveService.isIgnoringBatteryOptimizations(this)
         binding.tvQuickEntryStatus.text = when {
-            keepOn && battOk -> "快捷通知：已开启（拍照 / 截屏）· 电池无限制"
-            keepOn -> "快捷通知：已开启 · 建议设电池无限制"
-            else -> "快捷通知：未开启（点下方按钮开启）"
+            keepOn && battOk -> "保活通知：已开 · 请用快捷开关「取件拍照/截屏」"
+            keepOn -> "保活通知：已开 · 建议设电池无限制；拍照请用快捷开关"
+            else -> "快捷开关：下拉编辑添加「取件拍照 / 取件截屏」"
         }
         binding.tvQuickEntryStatus.setTextColor(
             ContextCompat.getColor(this, if (keepOn) R.color.accent else R.color.muted)
@@ -312,7 +322,7 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         binding.tvAccessibilityStatus.text = when {
             a11yLive -> "无障碍：已开启且在线（截屏可用）"
             a11yOn -> "无障碍：已开启，重连中…（稍等或回前台）"
-            else -> "无障碍：未开启（通知栏「截屏」必需）"
+            else -> "无障碍：未开启（快捷开关「取件截屏」必需）"
         }
         binding.tvAccessibilityStatus.setTextColor(
             ContextCompat.getColor(
@@ -330,6 +340,20 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         if (recognizing) return
         recognizing = true
         toast("正在识别取件码…")
+
+        val captureTarget = if (source == "screenshot" || source.startsWith("screenshot")) {
+            PickupCaptureAccessibilityService.consumeCaptureTarget(clear = true)
+        } else {
+            null to null
+        }
+        val srcPkg = captureTarget.first
+        val srcLabel = srcPkg?.let { AppInfoHelper.resolveLabel(this, it) }
+            ?: captureTarget.second?.takeIf { it.isNotBlank() }
+        val sourceTag = when {
+            source == "screenshot" && !srcLabel.isNullOrBlank() -> "screenshot:$srcLabel"
+            source == "screenshot" -> "screenshot"
+            else -> source
+        }
 
         lifecycleScope.launch {
             try {
@@ -350,9 +374,13 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
                     candidates = parsed.candidates,
                     ocrText = text,
                     thumbJpeg = tmp,
-                    source = source
+                    source = sourceTag,
+                    sourcePackage = srcPkg
                 )
                 showLatestPreview(record)
+                if (!srcLabel.isNullOrBlank()) {
+                    binding.etRemark.setText(srcLabel)
+                }
 
                 if (parsed.code != null) {
                     binding.etPickupCode.setText(parsed.code)
@@ -378,9 +406,15 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
         latestThumbPath = record.thumbPath
         val thumb = ImageUtils.loadBitmap(record.thumbPath)
         if (thumb != null) {
+            val isClipboard = record.source == "clipboard" || record.source.startsWith("clipboard:")
+            binding.ivPreview.scaleType =
+                if (isClipboard) android.widget.ImageView.ScaleType.FIT_CENTER
+                else android.widget.ImageView.ScaleType.CENTER_CROP
             binding.ivPreview.setImageBitmap(thumb)
             binding.rowLatestPreview.visibility = View.VISIBLE
-            binding.tvLatestCodeHint.text = record.pickupCode ?: "(未识别到取件码 · 点历史看详情)"
+            val appHint = HistoryAdapter.sourceLabel(record.source)
+            binding.tvLatestCodeHint.text =
+                (record.pickupCode ?: "(未识别到取件码 · 点历史看详情)") + " · $appHint"
         } else {
             binding.rowLatestPreview.visibility = View.GONE
         }
@@ -518,6 +552,129 @@ class MainActivity : AppCompatActivity(), PrinterManager.Listener, CaptureBus.Ca
             return
         }
         block()
+    }
+
+    private fun saveClipboardToHistory(
+        code: String,
+        candidates: List<String>,
+        ocrText: String,
+        srcLabel: String?,
+        srcPkg: String?
+    ) {
+        lifecycleScope.launch {
+            try {
+                val label = when {
+                    !srcPkg.isNullOrBlank() -> AppInfoHelper.resolveLabel(this@MainActivity, srcPkg)
+                    !srcLabel.isNullOrBlank() -> srcLabel
+                    else -> null
+                }
+                val sourceTag = when {
+                    !label.isNullOrBlank() -> "clipboard:$label"
+                    else -> "clipboard"
+                }
+                val tmp = withContext(Dispatchers.IO) {
+                    val file = File(cacheDir, "tmp_clipboard_${System.currentTimeMillis()}.jpg")
+                    if (!srcPkg.isNullOrBlank()) {
+                        AppInfoHelper.saveIconThumbJpeg(this@MainActivity, srcPkg, file)
+                            ?: run {
+                                val bmp = Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888)
+                                bmp.eraseColor(0xFFE8EEF5.toInt())
+                                ImageUtils.saveJpeg(bmp, file, quality = 70)
+                                bmp.recycle()
+                                file
+                            }
+                    } else {
+                        val bmp = Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888)
+                        bmp.eraseColor(0xFFE8EEF5.toInt())
+                        ImageUtils.saveJpeg(bmp, file, quality = 70)
+                        bmp.recycle()
+                        file
+                    }
+                }
+                val record = historyRepo.add(
+                    pickupCode = code,
+                    candidates = candidates,
+                    ocrText = ocrText,
+                    thumbJpeg = tmp,
+                    source = sourceTag,
+                    sourcePackage = srcPkg
+                )
+                showLatestPreview(record)
+            } catch (_: Exception) {
+                // 填入已成功，历史写入失败不打断主流程
+            }
+        }
+    }
+
+    private fun maybePromptClipboard() {
+        if (isFinishing || isDestroyed) return
+        if (clipboardPromptedThisResume) return
+        if (clipboardDialog?.isShowing == true) return
+        // 若刚从截屏/拍照回来，先别抢剪切板弹窗
+        if (recognizing) return
+
+        val snap = ClipboardProbe.read(this) ?: return
+        val prefs = getSharedPreferences("clipboard_probe", MODE_PRIVATE)
+        if (ClipboardProbe.wasHandled(prefs, snap.fingerprint)) return
+
+        val code = snap.code
+        if (code.isNullOrBlank()) return
+
+        clipboardPromptedThisResume = true
+        val (srcPkg, rawLabel) = PickupCaptureAccessibilityService.guessClipboardSourceApp()
+        val srcLabel = when {
+            !srcPkg.isNullOrBlank() -> AppInfoHelper.resolveLabel(this, srcPkg)
+            !rawLabel.isNullOrBlank() -> rawLabel
+            else -> null
+        }
+        val sourceLine = when {
+            !srcLabel.isNullOrBlank() -> "可能来自：$srcLabel"
+            !srcPkg.isNullOrBlank() -> "可能来自：$srcPkg"
+            else -> "来源应用：未知（开启无障碍后可尝试识别）"
+        }
+        val preview = snap.rawText.replace('\n', ' ').trim().let {
+            if (it.length > 120) it.take(120) + "…" else it
+        }
+        val message = buildString {
+            append(sourceLine)
+            append("\n\n剪切板内容：\n")
+            append(preview)
+            append("\n\n提取到的取件码：")
+            append(code)
+            if (snap.candidates.size > 1) {
+                append("\n其他候选：")
+                append(snap.candidates.filter { it != code }.take(5).joinToString("、"))
+            }
+            append("\n\n是否使用该取件码？")
+        }
+
+        clipboardDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("检测到剪切板取件码")
+            .setMessage(message)
+            .setPositiveButton("是，填入") { _, _ ->
+                ClipboardProbe.markHandled(prefs, snap.fingerprint)
+                binding.etPickupCode.setText(code)
+                binding.etPickupCode.setSelection(code.length)
+                if (!srcLabel.isNullOrBlank()) {
+                    binding.etRemark.setText(srcLabel)
+                }
+                saveClipboardToHistory(
+                    code = code,
+                    candidates = snap.candidates,
+                    ocrText = snap.rawText,
+                    srcLabel = srcLabel,
+                    srcPkg = srcPkg
+                )
+                toast("已填入取件码：$code")
+            }
+            .setNegativeButton("不是") { _, _ ->
+                ClipboardProbe.markHandled(prefs, snap.fingerprint)
+            }
+            .setNeutralButton("稍后") { _, _ ->
+                // 不标记，下次进 App 还可再问
+            }
+            .setOnDismissListener { clipboardDialog = null }
+            .show()
     }
 
     private fun toast(msg: String) {

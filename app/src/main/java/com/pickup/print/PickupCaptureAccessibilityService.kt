@@ -31,7 +31,8 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
     private val captureReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_CAPTURE) {
-                beginCaptureAfterShadeCollapsed()
+                val skipShadeDismiss = intent.getBooleanExtra(EXTRA_SKIP_SHADE_DISMISS, true)
+                beginCapture(skipShadeDismiss = skipShadeDismiss)
             }
         }
     }
@@ -53,7 +54,67 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
         KeepAliveService.start(applicationContext)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null) return
+        val pkg = event.packageName?.toString()?.takeIf { it.isNotBlank() }
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                // 记录近期前台应用（排除本 App / 超级小爱等系统助手）
+                if (pkg != null && pkg != packageName) {
+                    noteForegroundApp(pkg)
+                }
+            }
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
+                if (looksLikeCopyAction(event)) {
+                    val source = pkg ?: recentForegroundPackages.firstOrNull()
+                    if (!source.isNullOrBlank() && source != packageName) {
+                        val label = AppInfoHelper.resolveLabel(this, source)
+                        if (!isIgnoredSourceApp(source, label)) {
+                            lastCopySourcePackage = source
+                            lastCopySourceLabel = label
+                            lastCopyAtMs = System.currentTimeMillis()
+                            noteForegroundApp(source)
+                            Log.i(TAG, "copy action hint from=$source ($label)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun looksLikeCopyAction(event: AccessibilityEvent): Boolean {
+        val parts = buildList {
+            event.text?.forEach { add(it?.toString().orEmpty()) }
+            event.contentDescription?.let { add(it.toString()) }
+            event.className?.let { add(it.toString()) }
+        }.joinToString(" ")
+        if (parts.isBlank()) return false
+        val lower = parts.lowercase()
+        return parts.contains("复制") ||
+            parts.contains("拷贝") ||
+            lower.contains("copy") ||
+            lower.contains("clipboard")
+    }
+
+    private fun noteForegroundApp(pkg: String) {
+        val label = AppInfoHelper.resolveLabel(this, pkg)
+        if (isIgnoredSourceApp(pkg, label)) {
+            Log.d(TAG, "skip ignored foreground=$pkg ($label)")
+            return
+        }
+        synchronized(recentForegroundLock) {
+            recentForegroundPackages.removeAll { it == pkg }
+            recentForegroundPackages.add(0, pkg)
+            recentForegroundLabels[pkg] = label
+            while (recentForegroundPackages.size > 12) {
+                val removed = recentForegroundPackages.removeAt(recentForegroundPackages.lastIndex)
+                recentForegroundLabels.remove(removed)
+            }
+        }
+        lastForegroundPackage = pkg
+        lastForegroundLabel = label
+    }
 
     override fun onInterrupt() = Unit
 
@@ -67,16 +128,24 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 先收起通知下拉面板，确认收起后再截屏。
+     * 快捷开关点击时系统会先收起下拉面板，此时不要再 dismiss/Back，否则会误退前台 App。
+     * [skipShadeDismiss]=true：只稍等面板动画结束后截屏。
      */
-    private fun beginCaptureAfterShadeCollapsed() {
+    private fun beginCapture(skipShadeDismiss: Boolean) {
         if (capturePending) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Toast.makeText(this, "无障碍截屏需要 Android 11+", Toast.LENGTH_LONG).show()
             CaptureBus.emitFailure("需要 Android 11+")
             return
         }
+        // 收起通知栏前先记下被截屏的目标 App（排除小爱/系统界面）
+        snapshotCaptureTarget()
         capturePending = true
+        if (skipShadeDismiss) {
+            Log.i(TAG, "capture skip shade dismiss (QS already collapsed)")
+            mainHandler.postDelayed({ takeScreenshotNow() }, WAIT_AFTER_QS_COLLAPSE_MS)
+            return
+        }
         dismissNotificationShade()
         // 再补一次，部分机型第一次只缩一半
         mainHandler.postDelayed({
@@ -87,25 +156,29 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
         }, FIRST_DISMISS_GAP_MS)
     }
 
+    private fun snapshotCaptureTarget() {
+        val guessed = guessRecentForegroundApp()
+        val pkg = guessed.first
+        val label = if (!pkg.isNullOrBlank()) {
+            AppInfoHelper.resolveLabel(this, pkg)
+        } else {
+            guessed.second
+        }
+        lastCaptureTargetPackage = pkg
+        lastCaptureTargetLabel = label
+        Log.i(TAG, "capture target=$pkg ($label)")
+    }
+
     private fun dismissNotificationShade() {
-        var ok = false
         if (Build.VERSION.SDK_INT >= 31) {
             try {
-                ok = performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+                val ok = performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
                 Log.i(TAG, "DISMISS_NOTIFICATION_SHADE=$ok")
             } catch (e: Exception) {
                 Log.w(TAG, "dismiss shade failed", e)
             }
         }
-        if (!ok) {
-            // 旧系统 / 个别 ROM：用返回键尝试关掉面板
-            try {
-                ok = performGlobalAction(GLOBAL_ACTION_BACK)
-                Log.i(TAG, "GLOBAL_ACTION_BACK fallback=$ok")
-            } catch (_: Exception) {
-            }
-        }
-        // 再尝试 StatusBarManager（无障碍进程里权限通常更够用）
+        // 注意：不要用 GLOBAL_ACTION_BACK 兜底——面板已收起时会把前台 App 再退一步。
         try {
             val statusBarService = getSystemService("statusbar")
             if (statusBarService != null) {
@@ -172,9 +245,17 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "PickupA11y"
         const val ACTION_CAPTURE = "com.pickup.print.ACTION_A11Y_CAPTURE"
+        /** 快捷开关已收起面板时传 true，避免再 dismiss/Back */
+        const val EXTRA_SKIP_SHADE_DISMISS = "skip_shade_dismiss"
         private const val FIRST_DISMISS_GAP_MS = 180L
         /** 通知面板收起动画约 250–400ms，再多留余量 */
         private const val WAIT_AFTER_DISMISS_MS = 650L
+        /** 快捷开关点击后系统收起动画，稍等再截 */
+        private const val WAIT_AFTER_QS_COLLAPSE_MS = 280L
+
+        private val recentForegroundLock = Any()
+        private val recentForegroundPackages = mutableListOf<String>()
+        private val recentForegroundLabels = mutableMapOf<String, String>()
 
         @Volatile
         var instance: PickupCaptureAccessibilityService? = null
@@ -182,6 +263,82 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
 
         @Volatile
         var lastBitmap: Bitmap? = null
+
+        /** 最近一次非本 App、且非忽略名单的前台应用包名 */
+        @Volatile
+        var lastForegroundPackage: String? = null
+            private set
+
+        @Volatile
+        var lastForegroundLabel: String? = null
+            private set
+
+        /** 检测到「复制」点击时的来源应用 */
+        @Volatile
+        var lastCopySourcePackage: String? = null
+            private set
+
+        @Volatile
+        var lastCopySourceLabel: String? = null
+            private set
+
+        @Volatile
+        var lastCopyAtMs: Long = 0L
+            private set
+
+        /** 本次截屏动作锁定的目标应用（通知栏弹出前的前台 App） */
+        @Volatile
+        var lastCaptureTargetPackage: String? = null
+            private set
+
+        @Volatile
+        var lastCaptureTargetLabel: String? = null
+            private set
+
+        /** 排除超级小爱 / 小爱同学等系统助手与桌面壳。 */
+        fun isIgnoredSourceApp(pkg: String, label: String? = null): Boolean {
+            val p = pkg.lowercase()
+            val l = (label ?: "").lowercase()
+            if (l.contains("超级小爱") || l.contains("小爱同学") || l.contains("小爱")) return true
+            if (p.contains("voiceassist") || p.contains("xiaoai") || p.contains("aiasst")) return true
+            if (p == "com.miui.voiceassist" || p == "com.xiaomi.voiceassistant") return true
+            if (p == "com.miui.accessibility" || p.startsWith("com.android.systemui")) return true
+            if (p == "com.miui.home" || p == "com.android.launcher3") return true
+            return false
+        }
+
+        /** 最近一个非忽略前台应用（不含「复制」优先逻辑）。 */
+        fun guessRecentForegroundApp(): Pair<String?, String?> {
+            synchronized(recentForegroundLock) {
+                val pkg = recentForegroundPackages.firstOrNull()
+                val label = pkg?.let { recentForegroundLabels[it] ?: lastForegroundLabel }
+                return pkg to label
+            }
+        }
+
+        /** 优先返回复制动作来源；否则返回排除小爱后的最近前台应用。 */
+        fun guessClipboardSourceApp(): Pair<String?, String?> {
+            val now = System.currentTimeMillis()
+            val copyPkg = lastCopySourcePackage
+            val copyLabel = lastCopySourceLabel
+            if (!copyPkg.isNullOrBlank() &&
+                now - lastCopyAtMs < 10 * 60_000L &&
+                !isIgnoredSourceApp(copyPkg, copyLabel)
+            ) {
+                return copyPkg to copyLabel
+            }
+            return guessRecentForegroundApp()
+        }
+
+        /** 读取并可选清空本次截屏目标。 */
+        fun consumeCaptureTarget(clear: Boolean = true): Pair<String?, String?> {
+            val result = lastCaptureTargetPackage to lastCaptureTargetLabel
+            if (clear) {
+                lastCaptureTargetPackage = null
+                lastCaptureTargetLabel = null
+            }
+            return result
+        }
 
         fun isRunning(): Boolean = instance != null
 
@@ -201,7 +358,7 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
         fun isUsable(context: Context): Boolean =
             isRunning() || isEnabledInSettings(context)
 
-        fun requestCapture(context: Context): Boolean {
+        fun requestCapture(context: Context, skipShadeDismiss: Boolean = true): Boolean {
             if (instance == null) {
                 if (isEnabledInSettings(context)) {
                     Toast.makeText(context, "无障碍正在重连，请再点一次截取", Toast.LENGTH_SHORT).show()
@@ -210,7 +367,11 @@ class PickupCaptureAccessibilityService : AccessibilityService() {
                 }
                 return false
             }
-            context.sendBroadcast(Intent(ACTION_CAPTURE).setPackage(context.packageName))
+            context.sendBroadcast(
+                Intent(ACTION_CAPTURE)
+                    .setPackage(context.packageName)
+                    .putExtra(EXTRA_SKIP_SHADE_DISMISS, skipShadeDismiss)
+            )
             return true
         }
     }

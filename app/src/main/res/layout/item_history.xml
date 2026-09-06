@@ -8,13 +8,30 @@
     android:orientation="horizontal"
     android:padding="12dp">
 
-    <ImageView
-        android:id="@+id/ivThumb"
+    <FrameLayout
         android:layout_width="72dp"
-        android:layout_height="72dp"
-        android:background="@color/stroke"
-        android:contentDescription="预览图"
-        android:scaleType="centerCrop" />
+        android:layout_height="72dp">
+
+        <ImageView
+            android:id="@+id/ivThumb"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/stroke"
+            android:contentDescription="预览图"
+            android:scaleType="centerCrop" />
+
+        <ImageView
+            android:id="@+id/ivAppIcon"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="4dp"
+            android:background="@drawable/bg_card"
+            android:contentDescription="来源应用图标"
+            android:padding="2dp"
+            android:scaleType="fitCenter"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <LinearLayout
         android:layout_width="0dp"

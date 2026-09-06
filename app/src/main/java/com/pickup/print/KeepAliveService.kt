@@ -11,13 +11,11 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.provider.Settings
-import android.widget.Toast
 import androidx.core.app.NotificationCompat
 
 /**
- * 前台服务 + 通知栏快捷入口（拍照 / 截屏）。
- * 截屏收起通知面板由无障碍服务完成，此处只发起请求。
+ * 前台保活服务。拍照 / 截屏请优先用系统快捷开关；
+ * 通知仅作保活与回 App 入口（避免折叠后再点 Action）。
  */
 class KeepAliveService : Service() {
 
@@ -32,12 +30,12 @@ class KeepAliveService : Service() {
             }
             ACTION_CAMERA -> {
                 startAsForeground()
-                openCamera()
+                QuickActions.openCamera(this)
                 return START_STICKY
             }
             ACTION_SCREENSHOT -> {
                 startAsForeground()
-                triggerScreenshot()
+                QuickActions.triggerScreenshot(this)
                 return START_STICKY
             }
             else -> {
@@ -48,36 +46,6 @@ class KeepAliveService : Service() {
         }
     }
 
-    private fun openCamera() {
-        val intent = Intent(this, CameraCaptureActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra(CameraCaptureActivity.EXTRA_FROM_QUICK, true)
-        }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(this, "无法打开相机：${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun triggerScreenshot() {
-        if (!PickupCaptureAccessibilityService.isUsable(this)) {
-            Toast.makeText(this, "请先开启无障碍服务后再截屏", Toast.LENGTH_LONG).show()
-            try {
-                startActivity(
-                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-            } catch (_: Exception) {
-            }
-            return
-        }
-        val ok = PickupCaptureAccessibilityService.requestCapture(this)
-        if (!ok) {
-            Toast.makeText(this, "截屏未就绪，请稍后再试", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun startAsForeground() {
         val channelId = CHANNEL_ID
         val nm = getSystemService(NotificationManager::class.java)
@@ -85,10 +53,10 @@ class KeepAliveService : Service() {
             nm.createNotificationChannel(
                 NotificationChannel(
                     channelId,
-                    "快捷入口",
-                    NotificationManager.IMPORTANCE_DEFAULT
+                    "保活通知",
+                    NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "通知栏拍照 / 截屏快捷入口"
+                    description = "保持后台可用；拍照/截屏请用系统快捷开关"
                     setShowBadge(false)
                 }
             )
@@ -105,16 +73,6 @@ class KeepAliveService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val camera = PendingIntent.getService(
-            this, 5,
-            Intent(this, KeepAliveService::class.java).setAction(ACTION_CAMERA),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val screenshot = PendingIntent.getService(
-            this, 6,
-            Intent(this, KeepAliveService::class.java).setAction(ACTION_SCREENSHOT),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         val stop = PendingIntent.getService(
             this, 4,
             Intent(this, KeepAliveService::class.java).setAction(ACTION_STOP),
@@ -122,16 +80,14 @@ class KeepAliveService : Service() {
         )
 
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("取件码快捷入口")
-            .setContentText("点通知回 App · 或用下方按钮拍照 / 截屏")
+            .setContentTitle("取件码打印运行中")
+            .setContentText("拍照/截屏请用下拉快捷开关 · 点此回 App")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(openApp)
-            .addAction(0, "拍照", camera)
-            .addAction(0, "截屏", screenshot)
             .addAction(0, "关闭", stop)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
 

@@ -39,7 +39,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="通知栏快捷入口（拍照 / 截屏）→ 确认 → 德佟 P2 打印"
+            android:text="系统快捷开关（拍照 / 截屏）→ 确认 → 德佟 P2 打印"
             android:textColor="@color/muted"
             android:textSize="13sp" />
 
@@ -133,7 +133,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="快捷通知：未开启"
+                android:text="快捷开关：下拉状态栏可添加「取件拍照 / 取件截屏」"
                 android:textColor="@color/muted"
                 android:textSize="13sp" />
 
@@ -155,12 +155,20 @@
                 android:text="@string/enable_accessibility" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnKeepAlive"
+                android:id="@+id/btnAddQsTiles"
                 style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="开启快捷通知（拍照 / 截屏）" />
+                android:text="@string/add_qs_tiles" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnKeepAlive"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="开启保活通知（防杀后台）" />
 
             <LinearLayout
                 android:layout_width="match_parent"

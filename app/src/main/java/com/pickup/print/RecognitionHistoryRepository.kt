@@ -13,7 +13,9 @@ data class RecognitionRecord(
     val candidates: List<String>,
     val ocrText: String,
     val thumbPath: String,
-    val source: String
+    val source: String,
+    /** 来源应用包名，用于展示图标 / 备注 */
+    val sourcePackage: String? = null
 )
 
 class RecognitionHistoryRepository(private val context: Context) {
@@ -46,7 +48,8 @@ class RecognitionHistoryRepository(private val context: Context) {
         candidates: List<String>,
         ocrText: String,
         thumbJpeg: File,
-        source: String
+        source: String,
+        sourcePackage: String? = null
     ): RecognitionRecord {
         val id = UUID.randomUUID().toString()
         val dest = File(dir, "$id.jpg")
@@ -63,7 +66,8 @@ class RecognitionHistoryRepository(private val context: Context) {
             candidates = candidates,
             ocrText = ocrText,
             thumbPath = dest.absolutePath,
-            source = source
+            source = source,
+            sourcePackage = sourcePackage
         )
         val current = list().toMutableList()
         current.add(0, record)
@@ -95,6 +99,7 @@ class RecognitionHistoryRepository(private val context: Context) {
         put("ocrText", r.ocrText)
         put("thumbPath", r.thumbPath)
         put("source", r.source)
+        put("sourcePackage", r.sourcePackage ?: "")
     }
 
     private fun parse(obj: JSONObject): RecognitionRecord? {
@@ -111,7 +116,8 @@ class RecognitionHistoryRepository(private val context: Context) {
                 candidates = candidates,
                 ocrText = obj.optString("ocrText"),
                 thumbPath = obj.getString("thumbPath"),
-                source = obj.optString("source", "unknown")
+                source = obj.optString("source", "unknown"),
+                sourcePackage = obj.optString("sourcePackage").ifBlank { null }
             )
         } catch (_: Exception) {
             null

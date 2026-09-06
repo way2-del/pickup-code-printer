@@ -19,6 +19,23 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Android 11+：允许读取可启动 App 的名称/图标（剪切板/截屏来源） -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.tencent.mobileqq" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.taobao.taobao" />
+        <package android:name="com.sankuai.meituan" />
+        <package android:name="me.ele" />
+        <package android:name="com.xunmeng.pinduoduo" />
+        <package android:name="com.alibaba.android.rimet" />
+        <package android:name="com.tencent.wework" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -66,6 +83,28 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="quick_entry_and_keepalive" />
+        </service>
+
+        <service
+            android:name=".CameraQuickTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_camera"
+            android:label="@string/qs_camera_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".ScreenshotQuickTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_screenshot"
+            android:label="@string/qs_screenshot_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <service
