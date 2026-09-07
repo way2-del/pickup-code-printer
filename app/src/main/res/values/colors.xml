@@ -8,4 +8,5 @@
     <color name="accent_soft">#FFCCFBF1</color>
     <color name="danger">#FFB91C1C</color>
     <color name="stroke">#FFE7E5E4</color>
+    <color name="ic_launcher_background">#FFFFFFFF</color>
 </resources>

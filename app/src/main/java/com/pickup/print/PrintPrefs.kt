@@ -93,43 +93,86 @@ class PrintPrefs(context: Context) {
             .apply()
     }
 
-    fun loadLayout(): PrintLayoutConfig = PrintLayoutConfig(
-        paperWidthMm = prefs.getFloat(KEY_W, 48f),
-        paperHeightMm = prefs.getFloat(KEY_H, 40f),
-        orientation = PrintOrientation.fromId(prefs.getString(KEY_ORIENTATION, PrintOrientation.PORTRAIT.id)),
-        preset = LayoutPreset.fromId(prefs.getString(KEY_PRESET, LayoutPreset.TITLE_TOP.id)),
-        textAligns = loadAligns(prefs.getString(KEY_ALIGNS, null)),
-        showTitle = prefs.getBoolean(KEY_SHOW_TITLE, true),
-        showCode = prefs.getBoolean(KEY_SHOW_CODE, true),
-        showRemark = prefs.getBoolean(KEY_SHOW_REMARK, true),
-        showBarcode = prefs.getBoolean(KEY_SHOW_BARCODE, true),
-        titleText = prefs.getString(KEY_TITLE, "上门取件码") ?: "上门取件码",
-        codeFontMm = prefs.getFloat(KEY_CODE_FONT, 10f),
-        fontSizes = loadFontSizes(prefs.getString(KEY_FONTS, null)),
-        rowOrder = loadRowOrder(prefs.getString(KEY_ROW_ORDER, null))
-    )
+    fun loadLayout(category: PrintCategory = PrintCategory.PICKUP): PrintLayoutConfig {
+        val p = keyPrefix(category)
+        val defaults = defaultLayout(category)
+        return PrintLayoutConfig(
+            paperWidthMm = prefs.getFloat(p + KEY_W, defaults.paperWidthMm),
+            paperHeightMm = prefs.getFloat(p + KEY_H, defaults.paperHeightMm),
+            orientation = PrintOrientation.fromId(
+                prefs.getString(p + KEY_ORIENTATION, defaults.orientation.id)
+            ),
+            preset = LayoutPreset.fromId(prefs.getString(p + KEY_PRESET, defaults.preset.id)),
+            textAligns = loadAligns(prefs.getString(p + KEY_ALIGNS, null)),
+            showTitle = prefs.getBoolean(p + KEY_SHOW_TITLE, defaults.showTitle),
+            showCode = prefs.getBoolean(p + KEY_SHOW_CODE, defaults.showCode),
+            showRemark = prefs.getBoolean(p + KEY_SHOW_REMARK, defaults.showRemark),
+            showBarcode = prefs.getBoolean(p + KEY_SHOW_BARCODE, defaults.showBarcode),
+            titleText = prefs.getString(p + KEY_TITLE, defaults.titleText) ?: defaults.titleText,
+            codeFontMm = prefs.getFloat(p + KEY_CODE_FONT, defaults.codeFontMm),
+            fontSizes = loadFontSizes(prefs.getString(p + KEY_FONTS, null)),
+            rowOrder = loadRowOrder(prefs.getString(p + KEY_ROW_ORDER, null))
+        )
+    }
 
-    fun saveLayout(config: PrintLayoutConfig) {
+    fun saveLayout(config: PrintLayoutConfig, category: PrintCategory = PrintCategory.PICKUP) {
+        val p = keyPrefix(category)
         prefs.edit()
-            .putFloat(KEY_W, config.paperWidthMm)
-            .putFloat(KEY_H, config.paperHeightMm)
-            .putString(KEY_ORIENTATION, config.orientation.id)
-            .putString(KEY_PRESET, config.preset.id)
+            .putFloat(p + KEY_W, config.paperWidthMm)
+            .putFloat(p + KEY_H, config.paperHeightMm)
+            .putString(p + KEY_ORIENTATION, config.orientation.id)
+            .putString(p + KEY_PRESET, config.preset.id)
             .remove(KEY_ALIGN_LEGACY)
             .remove(KEY_POSITIONS_LEGACY)
-            .putString(KEY_ALIGNS, saveAligns(config.textAligns))
-            .putBoolean(KEY_SHOW_TITLE, config.showTitle)
-            .putBoolean(KEY_SHOW_CODE, config.showCode)
-            .putBoolean(KEY_SHOW_REMARK, config.showRemark)
-            .putBoolean(KEY_SHOW_BARCODE, config.showBarcode)
-            .putString(KEY_TITLE, config.titleText)
+            .putString(p + KEY_ALIGNS, saveAligns(config.textAligns))
+            .putBoolean(p + KEY_SHOW_TITLE, config.showTitle)
+            .putBoolean(p + KEY_SHOW_CODE, config.showCode)
+            .putBoolean(p + KEY_SHOW_REMARK, config.showRemark)
+            .putBoolean(p + KEY_SHOW_BARCODE, config.showBarcode)
+            .putString(p + KEY_TITLE, config.titleText)
             .putFloat(
-                KEY_CODE_FONT,
+                p + KEY_CODE_FONT,
                 config.fontSizes[PrintLayoutEngine.ElementBox.Kind.CODE.name] ?: config.codeFontMm
             )
-            .putString(KEY_FONTS, saveFontSizes(config.fontSizes))
-            .putString(KEY_ROW_ORDER, saveRowOrder(config.rowOrder))
+            .putString(p + KEY_FONTS, saveFontSizes(config.fontSizes))
+            .putString(p + KEY_ROW_ORDER, saveRowOrder(config.rowOrder))
             .apply()
+    }
+
+    /** 取件码沿用旧 key；杯贴用独立前缀，互不影响。 */
+    private fun keyPrefix(category: PrintCategory): String =
+        if (category == PrintCategory.PICKUP) "" else "${category.id}_"
+
+    /** 用户保存的自定义纸张尺寸（不含内置预设）。 */
+    fun loadCustomPaperSizes(): List<Pair<Float, Float>> {
+        val raw = prefs.getString(KEY_CUSTOM_PAPERS, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    add(obj.getDouble("w").toFloat() to obj.getDouble("h").toFloat())
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveCustomPaperSizes(sizes: List<Pair<Float, Float>>) {
+        val arr = JSONArray()
+        sizes.distinct().forEach { (w, h) ->
+            arr.put(JSONObject().put("w", w.toDouble()).put("h", h.toDouble()))
+        }
+        prefs.edit().putString(KEY_CUSTOM_PAPERS, arr.toString()).apply()
+    }
+
+    fun addCustomPaperSize(widthMm: Float, heightMm: Float): List<Pair<Float, Float>> {
+        val w = widthMm.coerceIn(20f, 80f)
+        val h = heightMm.coerceIn(15f, 100f)
+        val next = (loadCustomPaperSizes() + (w to h)).distinct().takeLast(12)
+        saveCustomPaperSizes(next)
+        return next
     }
 
     private fun loadAligns(raw: String?): Map<String, TextHAlign> {
@@ -201,6 +244,21 @@ class PrintPrefs(context: Context) {
     }
 
     companion object {
+        fun defaultLayout(category: PrintCategory): PrintLayoutConfig = when (category) {
+            PrintCategory.PICKUP -> PrintLayoutConfig()
+            PrintCategory.TEA_CUP -> PrintLayoutConfig(
+                paperWidthMm = 40f,
+                paperHeightMm = 30f,
+                preset = LayoutPreset.CENTER_CODE,
+                showTitle = true,
+                showCode = true,
+                showRemark = true,
+                showBarcode = false,
+                titleText = "取茶号",
+                codeFontMm = 12f,
+            )
+        }
+
         private const val PREFS = "print_prefs"
         private const val KEY_DEFAULT_PRINTER = "default_printer_key"
         private const val KEY_DEFAULT_NAME = "default_printer_name"
@@ -219,5 +277,6 @@ class PrintPrefs(context: Context) {
         private const val KEY_CODE_FONT = "code_font"
         private const val KEY_FONTS = "font_sizes"
         private const val KEY_ROW_ORDER = "row_order"
+        private const val KEY_CUSTOM_PAPERS = "custom_paper_sizes"
     }
 }

@@ -34,9 +34,10 @@ object PrintLayoutEngine {
             val slot = slots[index]
             val content = contentByKind[kind] ?: slot
             val font = config.fontSizeFor(kind)?.toDouble() ?: content.fontMm
-            // 行高按字号本身，打印用顶对齐时 y~y+h 正好包住字形
+            // 行高按字号本身；条码可用 fontSizes[BARCODE] 覆盖高度
             val boxH = when (kind) {
-                ElementBox.Kind.BARCODE -> maxOf(slot.h, 6.0)
+                ElementBox.Kind.BARCODE ->
+                    config.fontSizeFor(kind)?.toDouble()?.coerceAtLeast(4.0) ?: maxOf(slot.h, 6.0)
                 else -> font
             }
             ElementBox(
@@ -45,7 +46,7 @@ object PrintLayoutEngine {
                 y = slot.y,
                 w = slot.w,
                 h = boxH,
-                fontMm = font,
+                fontMm = if (kind == ElementBox.Kind.BARCODE) boxH * 0.25 else font,
                 kind = kind
             )
         }

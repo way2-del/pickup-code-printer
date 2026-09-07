@@ -11,12 +11,29 @@ object ImageUtils {
 
     /** 生成预览缩略图，最长边不超过 [maxSide] 像素。 */
     fun createThumbnail(source: Bitmap, maxSide: Int = 360): Bitmap {
+        return scaleDownIfNeeded(source, maxSide)
+    }
+
+    /**
+     * 保存识别原图（可略压缩超大图），保持比例不变形。
+     * 用于历史/首页裁剪预览与点击看大图。
+     */
+    fun saveHistoryJpeg(source: Bitmap, file: File, maxSide: Int = 2048, quality: Int = 88): File {
+        val scaled = scaleDownIfNeeded(source, maxSide)
+        try {
+            return saveJpeg(scaled, file, quality)
+        } finally {
+            if (scaled !== source) scaled.recycle()
+        }
+    }
+
+    fun scaleDownIfNeeded(source: Bitmap, maxSide: Int): Bitmap {
         val w = source.width
         val h = source.height
         if (w <= 0 || h <= 0) return source
         val longest = max(w, h)
         if (longest <= maxSide) {
-            return source.copy(Bitmap.Config.ARGB_8888, false)
+            return source.copy(Bitmap.Config.ARGB_8888, false) ?: source
         }
         val scale = maxSide.toFloat() / longest
         val tw = (w * scale).roundToInt().coerceAtLeast(1)
